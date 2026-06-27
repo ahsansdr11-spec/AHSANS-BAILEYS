@@ -1,0 +1,24 @@
+{
+  "name": "verity-backend",
+  "version": "1.0.0",
+  "description": "Node.js backend for Verity Minecraft Bedrock addon LLM integration.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "minecraft",
+    "bedrock",
+    "addon",
+    "verity",
+    "llm",
+    "openai"
+  ],
+  "author": "Manus AI",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "openai": "^4.47.1"
+  }
+}
