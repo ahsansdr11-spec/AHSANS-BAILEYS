@@ -15,7 +15,6 @@ export * from './Bussines.js';
 export * from './Newsletter.js';
 import type { AuthenticationState } from './Auth.js';
 import type { SocketConfig } from './Socket.js';
- upstream
 export type UserFacingSocketConfig = Partial<SocketConfig> & {
   auth: AuthenticationState;
 };

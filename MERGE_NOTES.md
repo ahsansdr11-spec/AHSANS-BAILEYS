@@ -88,3 +88,48 @@ Fork `suhwr/Baileys` = base v7.0.0-rc.5 + 3 patch custom (auth-concurrency, reve
 - unit test: **42 lulus** (12 lama + 30 baru: interaktif, rich, wraps, guard, regresi bugfix)
 - `tsc --noEmit` pada `Types/Message.d.ts`: bersih
 - smoke end-to-end via `lib/index.js`: semua ekspor + generate konten OK
+
+---
+
+## Round 5 (v1.2.0 → `ahsans-baileys`) — Audit P0–P2, Node 24 baseline, hardening produksi
+
+Audit menyeluruh (stabilitas 24/7, keamanan, memori, Pterodactyl) atas seluruh `lib/`, `WAProto/`, `test/`, manifest. Semua perubahan ber-alasan teknis, additive-first, tanpa giant rewrite.
+
+### P0 — Critical
+1. **[SECURITY] Shell injection** di `extractVideoThumb` (`lib/Utils/messages-media.js`) — `exec()` menginterpolasi path file ke string shell. → `execFile('ffmpeg', [...argv])`; path tak lagi dieksekusi shell.
+2. **[CRASH] Unhandled rejection mematikan proses** pada `ws.on('message', onMessageReceived)` (`lib/Socket/socket.js`) — frame rusak/bad-MAC melempar tanpa handler → `unhandledRejection`. → dibungkus `Promise.resolve().catch()` → `end(Boom(badSession))`.
+3. **[CRASH] Unhandled rejection di VoIP relay** (`lib/VoIP/relay-transport.js`) — 3 titik `void this.#ensureConnection(...)` / `void poll()` tanpa catch; tanpa `@roamhq/wrtc` proses mati. → semua fire-and-forget diberi `.catch()` + state `error` per koneksi.
+4. **[SECURITY/UX] Auto-follow newsletter default `true`** mengikuti channel pihak ketiga hardcoded di setiap akun pengguna → kini **opt-in** (`Defaults/index.js`).
+5. **[TYPES] `WAProto/index.d.ts` 72 byte (kosong)** — seluruh API proto tak bertipe (110 file `.d.ts` merujuknya). → digenerasi penuh (1,2 MB) via `pbjs|pbts` (protobufjs-cli kini devDependency + script regen di README).
+
+### P1 — Stabilitas, memori, shutdown
+6. **Auth-state multi-file tanpa atomic write** — kill di tengah `writeFile` = korupsi kredensial. → tulis ke `${file}.${pid}.${rand}.tmp` lalu `rename` (atomik POSIX); temp dibuang saat gagal; lock map dibatasi (LRU-like prune) (`use-multi-file-auth-state.js`).
+7. **Auth-state single-file diam-diam kehilangan tulisan** — error flush ditelan `catch {}`; timer debounce 3 dts tak bisa di-flush saat shutdown; temp name tabrakan antar proses. → flush error kini dilog via opsi `logger`, temp unik per-proses, API baru `flush()`/`close()` (`use-single-file-auth-state.js` + `.d.ts`).
+8. **Kebocoran 5 interval NodeCache per socket** — cache internal (`placeholderResendCache`, `userDevicesCache`, `msgRetryCache`, `callOfferCache`, `identityAssertDebounce`) tak ditutup saat socket berakhir → bocor interval 600 dts per reconnect. → semua cache internal kini `close()` di `registerSocketEndHandler` (`chats.js`, `messages-send.js`, `messages-recv.js`); terverifikasi 0 timer tertinggal (uji 50 socket).
+9. **`uploadPreKeys` timeout timer tidak di-clear** (`socket.js`) → di-clear di `finally` + `unref()`.
+10. **`WebSocketClient.close()` bisa menggantung selamanya** bila peer abaikan close handshake (Pterodactyl Kill timeout) → fallback `terminate()` 3 dts (`Client/websocket.js`).
+11. **`awaitingSyncTimeout` tidak dibersihkan saat koneksi close** (`chats.js`) → dibersihkan pada `connection.update close`.
+12. **tc-token index flush tertunda saat shutdown** (`messages-recv.js`) → timer di-clear + flush final di socket-end handler.
+13. **`mediaConn` bisa ter-poison** oleh promise query yang ditolak (`messages-send.js`) → cache di-reset pada error, fetch berikutnya retry.
+14. **`MessageRetryManager` tanpa `maxMsgRetryCount` → retry tak terbatas** (0 falsy) → default 5 (`message-retry-manager.js`).
+15. **Crash pada `GROUP_MEMBERSHIP_JOIN_APPROVAL_REQUEST_NON_ADMIN_ADD`** — `JSON.parse` stub server tanpa guard (`process-message.js`) → try/catch + log.
+16. **Sticker pack malformed input → TypeError di kedalaman `getStream`** → validasi entri (Buffer/url/stream/path) → Boom 400 actionable (`messages.js`).
+17. **`newsletterMultipleFollow` crash pada input array/undefined** (`jids.split`) → terima array/string/JID tunggal + validasi; `newsletterAction` divalidasi (cegah path injection ke XWA path); `cekIDSaluran` menolak non-string (`newsletter.js`).
+18. **Circular import** `Modded/message_builder.js → lib/index.js` (siklus melalui `Socket/…/messages-send.js`) → kini mengimpor langsung dari `Utils/messages.js`.
+19. **Ambiguous star-export menghapus nama publik** — `tokenizeCode`, `CodeHighlightType`, `RichSubMessageType` didefinisikan ganda (`Types/RichType.js` vs `Utils/rich-messages.js`; `rich-message-utils.js` vs `rich-messages.js`) → ESM meng-drop nama ambigu; enum digabung ke `Types/RichType.js` (re-export), `tokenizeCode` di-pin eksplisit; `Types/Newsletter.d.ts` kini re-export dari `Mex.d.ts` (menghilangkan TS2308 `NewsletterMetadata` dll.), duplikat `NewsletterCreateResponse` & `TimeMs` dihapus.
+20. **Konfigurasi `undefined` menimpa default** — `{ keepAliveIntervalMs: undefined }` → `NaN` interval → reconnect loop mati. → `Socket/index.js` membuang value `undefined` sebelum merge.
+21. **`TypeScript` declaration ↔ runtime** — `Modded/message_builder.d.ts` (ORich/AIRich/Button/ButtonV2/Carousel/Toolkit) & `VoIP/index.d.ts` (VoipClient/ActiveCall) dibuat; `Socket/index.d.ts` diimpor tipe options yang sebelumnya tak ditemukan (`TableV2Options` dll.); `Types/index.d.ts` baris ` upstream` sintaks-rusak dihapus; `Types/RichType.d.ts` enum nyata; `Utils/rich-messages.d.ts` enum duplikat → re-export; `Utils/use-single-file-auth-state.d.ts` diperbarui. `tsc --noEmit lib/index.d.ts` kini **bersih** (sebelumnya 51 error).
+
+### P2 — Kualitas & DevEx
+22. `console.log/warn/error` di library → logger (communities, business); `sharp`/`fluent-ffmpeg` lazy-load (tidak ada warning saat import, tidak ada beban startup); `fetchLatestBaileysVersion` tak lagi bergantung nomor baris; VoIP `disconnect()` melepas listener `CB:call`/`CB:receipt` + feeder; `package.json` → nama `ahsans-baileys`, `engines.node >=24`, `exports` map, peer `fluent-ffmpeg` (dipakai runtime, sebelumnya tak dideklarasikan), `protobufjs-cli` devDep, `scripts.test` = `node --test test/`, metadata repo dikoreksi.
+
+### API baru (additive, tidak breaking)
+- `createReconnectManager()` / `getDisconnectStatusCode()` / `FATAL_DISCONNECT_CODES` (`lib/Utils/reconnect-manager.js` + `.d.ts`): backoff eksponensial + full jitter + cap, single-flight, klasifikasi fatal-auth, shutdown-aware (`stop()`), hook `onSocket/onOpen/onDisconnect/onGiveUp`.
+- `useSingleFileAuthState(...)` → `{ flush, close }` + opsi `{ logger }`.
+- `useMultiFileAuthState` — tulis atomik (perilaku sama, lebih aman).
+
+### Verifikasi
+- `node --test test/` di Node.js **24.19.0**: **37/37 lulus** (core 18, auth-state 10, lifecycle 4, stress 5) + test legacy (import 19 asersi, unit 38 asersi) lulus.
+- Stress: 50 socket berurutan → 0 timer tertinggal; 30 siklus reconnect → tanpa duplikasi socket; 2.000 tulisan auth concurrent → tanpa akumulasi timer & tanpa file temp tersisa; 20.000 event buffer → heap terbatas.
+- `tsc --noEmit lib/index.d.ts` bersih; `engine-requirements.js` menolak Node 22, menerima Node 24.
+- Uji keamanan: tidak ada `console.*` di `lib/` (kecuali bundel WASM), tidak ada kredensial pada panggilan logger/error.

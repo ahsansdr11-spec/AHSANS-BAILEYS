@@ -21,6 +21,10 @@ export * from './identity-change-handler.js';
 export * from './stanza-ack.js';
 export * from './rich-messages.js';
 export * from './sticker-pack.js';
+// both rich-message-utils.js and rich-messages.js export `tokenizeCode`; an
+// ambiguous `export *` silently DROPS the name in ESM, so pin it explicitly
+export * from './reconnect-manager.js';
+export { tokenizeCode } from './rich-messages.js';
 //# sourceMappingURL=index.d.ts.map
 export * from './rich-message-utils.js';
 export * from './use-single-file-auth-state.js';

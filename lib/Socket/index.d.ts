@@ -1,4 +1,5 @@
 import type { UserFacingSocketConfig } from '../Types/index.js';
+import type { TableV2Options, CodeBlockV2Options, LinkMessageOptions, LinkV2MessageOptions } from '../Utils/rich-messages.js';
 declare const makeWASocket: (config: UserFacingSocketConfig) => {
     communityMetadata: (jid: string) => Promise<import("../index.js").GroupMetadata>;
     communityCreate: (subject: string, body: string) => Promise<import("../index.js").GroupMetadata | null>;
