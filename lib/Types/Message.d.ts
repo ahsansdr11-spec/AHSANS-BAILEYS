@@ -401,7 +401,7 @@ export type AnyMessageContent = AnyRegularMessageContent | {
     metadata?: unknown;
 } } & Contextable) | {
     paymentInviteServiceType: number;
-} | ({ orderText: string; thumbnail: Buffer; [key: string]: unknown; } & Contextable) | ({ buttons: LegacyButtonOption[]; text?: string; caption?: string; footer?: string; title?: string; } & Contextable) | ({ sections: proto.Message.IListMessage.ISection[]; buttonText: string; title?: string; text?: string; footer?: string; listType?: number; } & Contextable) | ({ templateButtons: TemplateButtonOption[]; text?: string; caption?: string; footer?: string; id?: string; } & Contextable & Mentionable) | (InteractiveMessageOptions & {
+} | ({ orderText: string; thumbnail: Buffer; [key: string]: unknown; } & Contextable) | ({ buttons: LegacyButtonOption[]; text?: string; caption?: string; footer?: string; title?: string; } & Contextable) | ({ sections: proto.Message.ListMessage.ISection[]; buttonText: string; title?: string; text?: string; footer?: string; listType?: number; } & Contextable) | ({ templateButtons: TemplateButtonOption[]; text?: string; caption?: string; footer?: string; id?: string; } & Contextable & Mentionable) | (InteractiveMessageOptions & {
     nativeFlow: NativeFlowButton[];
 } & Contextable & Mentionable & Editable) | ({ cards: CarouselCardOptions[]; text?: string; } & Contextable) | ({ requestPaymentFrom: string; noteMessage?: unknown; [key: string]: unknown; } & Contextable) | ({ invoiceNote: string; } & AnyMediaMessageContent) | RawMessageContent | RichResponseOptions;
 export type GroupMetadataParticipants = Pick<GroupMetadata, 'participants'>;

@@ -5,26 +5,10 @@ export declare const GO_KEYWORDS: Set<string>;
 export declare const LUA_KEYWORDS: Set<string>;
 export declare const BASH_KEYWORDS: Set<string>;
 export declare const LANGUAGE_KEYWORDS: Record<string, Set<string>>;
-export declare enum CodeHighlightType {
-  DEFAULT = 0,
-  KEYWORD = 1,
-  METHOD = 2,
-  STRING = 3,
-  NUMBER = 4,
-  COMMENT = 5,
-}
-export declare enum RichSubMessageType {
-  UNKNOWN = 0,
-  GRID_IMAGE = 1,
-  TEXT = 2,
-  INLINE_IMAGE = 3,
-  TABLE = 4,
-  CODE = 5,
-  DYNAMIC = 6,
-  MAP = 7,
-  LATEX = 8,
-  CONTENT_ITEMS = 9,
-}
+// canonical definitions live in Types/RichType.js — re-exported here to keep
+// `import { CodeHighlightType } from '.../rich-messages.js'` working without
+// duplicating the enums (duplicate star-exports get dropped by ESM)
+export { CodeHighlightType, RichSubMessageType } from "../Types/RichType.js";
 export interface RichMessageOptions {
   headerText?: string;
   footer?: string;
