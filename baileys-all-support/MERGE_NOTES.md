@@ -1,4 +1,4 @@
-# Merge Notes — baileys-all-support 1.0.0
+# Merge Notes — baileys-all-support 1.1.0
 
 Dokumen teknis penggabungan **WhiskeySockets/Baileys `7.0.0-rc14`** × **ourin-baileys `9.0.21`**.
 
@@ -61,3 +61,30 @@ baileys-all-support/
 ├── test/                    # import + unit test
 └── example/basic.js
 ```
+
+---
+
+## Round 4 (v1.1.0) — Bug hunt mendalam + merge baileys-nya Shiroine & Sairidev
+
+### Hasil bug hunt (linkcheck + diff forensik + smoke)
+1. **[BUGFIX vs upstream itsliaaa] Rich message crash** — `language ||= 'javascript'` pada binding hasil destructuring `const` melempar `TypeError: Assignment to constant variable` di Node/V8 modern setiap kali `generateWAMessageContent({ code })` dipanggil tanpa `language`. Diganti evaluasi `const codeLanguage = language || 'javascript'`.
+2. **[BUGFIX vs upstream itsliaaa] Rich message tidak pernah terkirim** — `wrapToBotForwardedMessage()` menaruh `botForwardedMessage` DI DALAM `messageContextInfo`; `proto.Message.ContextInfo` tidak punya field itu sehingga `protobufjs` **membuang seluruh payload rich** secara diam-diam saat `Message.create()`. Diperbaiki: `botForwardedMessage` (bertipe `FutureProofMessage{ message }`) dipindah ke level `proto.Message`, `botMetadata` tetap di `messageContextInfo`. Terverifikasi payload encode 2.1 KB.
+3. **[BUGFIX] Media newsletter ditolak server** — upload media ke channel/nl masih memakai path `/o1/` (`MEDIA_PATH_MAP`). Ditambah `NEWSLETTER_MEDIA_PATH_MAP` (path `/newsletter/…` = mesin `/m1/`), flag `newsletter` pada `options.upload(...)`, jalur raw-upload + `server_thumb_gen=1` + field `thumbnail_info` (port itsliaaa).
+4. **[HARDENING] AI label** — `content.ai = true` kini ditolak (Boom 400) di chat non-private + menyisipkan `supportPayload` resmi (`BIZ_BOT_SUPPORT_PAYLOAD`).
+
+### Merge Shiroine (bot shiroine.web.id)
+Fork `suhwr/Baileys` = base v7.0.0-rc.5 + 3 patch custom (auth-concurrency, revert #1665, Signal/messages-recv). Audit baris-per-baris: **100% sudah terserap di v7.0.0-rc14** yang jadi basis paket ini — tidak ada yang perlu di-port.
+
+### Merge Sairidev (= @itsliaaa/baileys 0.3.18-final) — 60 marker `Lia@Changes/Lia@Fix` diport
+- **`Utils/messages.js`**: 19 content-type baru — `raw`, `code`, `links`, `table`, `richResponse` (AI rich), `stickers` (sticker pack + cache + konversi WebP + limit 60), `keep`, `flowReply`, `ptv`, quiz poll (`pollType:1` → `pollCreationMessageV5`), `pollResult`, `pollUpdate`, `paymentInviteServiceType`, `orderText`, `buttons` (+ shortcut `single_select`), `sections`, `templateButtons`, `nativeFlow` (quick_reply/cta_copy/cta_url/cta_call + offer/bottom-sheet), `cards` (carousel + header product), `requestPaymentFrom`, `invoiceNote`; context options `externalAdReply` langsung, `groupStatus`, `spoiler`, `interactiveAsTemplate`, `ephemeral`, `isLottie`, `viewOnceV2`, `viewOnceV2Extension`, `deviceListMetadata` private chat; `getFutureProofMessage` diperluas (16 wrapper tambahan termasuk `botForwardedMessage`, `spoilerMessage`, `lottieStickerMessage`).
+- **`Utils/rich-message-utils.js` (file baru)** + `Types/RichType.js`: tokenizer highlight kode (13 bahasa), table/links/latex → `AIRichResponseMessage` + `unifiedResponse` (dengan 2 bugfix di atas).
+- **`Socket/messages-send.js`**: `additionalNodes` untuk stanza newsletter, node `meta` (`content_type=add_on` utk pin/keep/reaction, `polltype=vote`, `is_group_status`), `decrypt-fail=hide` utk edit/memberLabel/mediaNotify, attr `native_flow_name`, **auto-relay media album** (`messageAssociation MEDIA_ALBUM` + delay), **status mentions** (`sendMessage([jid…])` → expand participant group + `statusMentionMessage`/`groupStatusMentionMessage`).
+- **`Utils/use-single-file-auth-state.js` (file baru)**: auth state 1 file + LRU cache + mutex anti race + atomic write (temp+rename).
+- **`Types/Message.js`**: export enum `ButtonType`, `ButtonHeaderType`, `CarouselCardType`, `ListType`, `AssociationType`, `ProtocolType`.
+- **Types `.d.ts`**: `AnyMessageContent` diperluas penuh (semua tipe baru) + `Contextable`/`ViewOnce` + `.d.ts` baru utk 3 file port.
+
+### Verifikasi
+- linkcheck import dinamis: **114 modul, 0 kegagalan** (+3 modul baru)
+- unit test: **42 lulus** (12 lama + 30 baru: interaktif, rich, wraps, guard, regresi bugfix)
+- `tsc --noEmit` pada `Types/Message.d.ts`: bersih
+- smoke end-to-end via `lib/index.js`: semua ekspor + generate konten OK

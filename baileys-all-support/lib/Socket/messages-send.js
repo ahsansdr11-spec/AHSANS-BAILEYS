@@ -1,8 +1,11 @@
 import NodeCache from '@cacheable/node-cache';
 import { Boom } from '@hapi/boom';
+import { randomBytes } from 'crypto';
 import { proto } from '../../WAProto/index.js';
 import { DEFAULT_CACHE_TTLS, WA_DEFAULT_EPHEMERAL } from '../Defaults/index.js';
-import { aggregateMessageKeysNotFromMe, assertMediaContent, assertMeId, bindWaitForEvent, decryptMediaRetryData, DEF_MEDIA_HOST, encodeNewsletterMessage, encodeSignedDeviceIdentity, encodeWAMessage, encryptMediaRetryRequest, extractDeviceJids, generateMessageIDV2, generateParticipantHashV2, generateWAMessage, generateWAMessageFromContent, getStatusCodeForMediaRetry, getUrlFromDirectPath, getWAUploadToServer, MessageRetryManager, normalizeMessageContent, parseAndInjectE2ESessions, prepareWAMessageMedia, unixTimestampSeconds } from '../Utils/index.js';
+import { aggregateMessageKeysNotFromMe, assertMediaContent, assertMeId, bindWaitForEvent, decryptMediaRetryData, DEF_MEDIA_HOST, delay, encodeNewsletterMessage, encodeSignedDeviceIdentity, encodeWAMessage, encryptMediaRetryRequest, extractDeviceJids, generateMessageIDV2, generateParticipantHashV2, generateWAMessage, generateWAMessageFromContent, getStatusCodeForMediaRetry, getUrlFromDirectPath, getWAUploadToServer, hasValidAlbumMedia, MessageRetryManager, normalizeMessageContent, parseAndInjectE2ESessions, prepareWAMessageMedia, unixTimestampSeconds } from '../Utils/index.js';
+import { AssociationType } from '../Types/index.js';
+import { BIZ_BOT_SUPPORT_PAYLOAD } from '../Defaults/index.js';
 import { getUrlInfo } from '../Utils/link-preview.js';
 import { makeKeyedMutex, makeMutex } from '../Utils/make-mutex.js';
 import { getMessageReportingToken, shouldIncludeReportingToken } from '../Utils/reporting-utils.js';
@@ -506,13 +509,19 @@ export const makeMessagesSocket = (config) => {
             });
         }
         await authState.keys.transaction(async () => {
-            const mediaType = getMediaType(normalizeMessageContent(message) || message);
+            // [Ported from @itsliaaa/baileys] normalize once — reuse for mediatype/meta attrs/newsletter
+            const innerMessage = normalizeMessageContent(message);
+            const mediaType = getMediaType(innerMessage || message);
             if (mediaType) {
                 extraAttrs['mediatype'] = mediaType;
             }
             if (isNewsletter) {
                 const patched = patchMessageBeforeSending ? await patchMessageBeforeSending(message, []) : message;
                 const bytes = encodeNewsletterMessage(patched);
+                // [Ported from @itsliaaa/baileys] allow additionalNodes for newsletter stanzas too
+                if (additionalNodes && additionalNodes.length > 0) {
+                    binaryNodeContent.push(...additionalNodes);
+                }
                 binaryNodeContent.push({
                     tag: 'plaintext',
                     attrs: extraAttrs || {},
@@ -523,7 +532,7 @@ export const makeMessagesSocket = (config) => {
                     attrs: {
                         to: jid,
                         id: msgId,
-                        type: getMessageType(message),
+                        type: getMessageType(innerMessage),
                         ...(additionalAttributes || {})
                     },
                     content: binaryNodeContent
@@ -532,8 +541,33 @@ export const makeMessagesSocket = (config) => {
                 await sendNode(stanza);
                 return;
             }
-            if (normalizeMessageContent(message)?.pinInChatMessage || normalizeMessageContent(message)?.reactionMessage) {
+            // [Ported from @itsliaaa/baileys] meta node for add-on messages (pin/keep/reaction), poll votes & group status
+            const isNeedMetaAttrs = innerMessage?.pinInChatMessage || innerMessage?.keepInChatMessage || innerMessage?.reactionMessage;
+            const isGroupStatus = message?.groupStatusMessage || message?.groupStatusMessageV2;
+            const isPollUpdate = innerMessage?.pollUpdateMessage;
+            if (isNeedMetaAttrs || isGroupStatus || isPollUpdate) {
+                const metaAttrs = {};
+                if (isNeedMetaAttrs) {
+                    metaAttrs.content_type = 'add_on';
+                }
+                if (isPollUpdate && !isGroupStatus) {
+                    metaAttrs.polltype = 'vote';
+                }
+                if (isGroupStatus) {
+                    metaAttrs.is_group_status = 'true';
+                }
+                binaryNodeContent.push({
+                    tag: 'meta',
+                    attrs: metaAttrs,
+                    content: undefined
+                });
+            }
+            if (isNeedMetaAttrs || innerMessage?.protocolMessage?.memberLabel || innerMessage?.protocolMessage?.editedMessage || innerMessage?.protocolMessage?.mediaNotifyMessage) {
                 extraAttrs['decrypt-fail'] = 'hide'; // todo: expand for reactions and other types
+            }
+            // [Ported from @itsliaaa/baileys] native_flow_name attr when sending interactiveResponseMessage
+            if (innerMessage?.interactiveResponseMessage?.nativeFlowResponseMessage) {
+                extraAttrs['native_flow_name'] = innerMessage.interactiveResponseMessage.nativeFlowResponseMessage.name;
             }
             if (isGroupOrStatus && !isRetryResend) {
                 const [groupData, senderKeyMap] = await Promise.all([
@@ -1354,6 +1388,101 @@ export const makeMessagesSocket = (config) => {
         },
         sendMessage: async (jid, content, options = {}) => {
             const userJid = authState.creds.me.id;
+            // [Ported from @itsliaaa/baileys] status mentions: pass an array of jids to mention in a status
+            if (Array.isArray(jid)) {
+                const { delayMs = 1500 } = options;
+                const allUsers = new Set();
+                const fullMsg = await generateWAMessage('status@broadcast', content, {
+                    logger,
+                    userJid,
+                    upload: waUploadToServer,
+                    mediaCache: config.mediaCache,
+                    options: config.options,
+                    ...options,
+                    messageId: generateMessageIDV2(userJid)
+                });
+                for (const id of jid) {
+                    if (isJidGroup(id)) {
+                        try {
+                            const groupData = (cachedGroupMetadata ? await cachedGroupMetadata(id) : null) || await groupMetadata(id);
+                            for (const participant of groupData.participants) {
+                                if (allUsers.has(participant.id))
+                                    continue;
+                                allUsers.add(participant.id);
+                            }
+                        }
+                        catch (error) {
+                            logger.error(`Error getting metadata group from ${id}: ${error}`);
+                        }
+                    }
+                    else if (!allUsers.has(id)) {
+                        allUsers.add(id);
+                    }
+                }
+                await relayMessage('status@broadcast', fullMsg.message, {
+                    messageId: fullMsg.key.id,
+                    statusJidList: Array.from(allUsers),
+                    additionalNodes: [
+                        {
+                            tag: 'meta',
+                            attrs: {},
+                            content: [
+                                {
+                                    tag: 'mentioned_users',
+                                    attrs: {},
+                                    content: jid.map(id => ({
+                                        tag: 'to',
+                                        attrs: { jid: id },
+                                        content: undefined
+                                    }))
+                                }
+                            ]
+                        }
+                    ]
+                });
+                if (config.emitOwnEvents) {
+                    process.nextTick(async () => {
+                        await messageMutex.mutex(() => upsertMessage(fullMsg, 'append'));
+                    });
+                }
+                for (const id of jid) {
+                    const isGroup = isJidGroup(id);
+                    const sendType = isGroup ? 'groupStatusMentionMessage' : 'statusMentionMessage';
+                    const mentionMsg = generateWAMessageFromContent(id, {
+                        messageContextInfo: {
+                            messageSecret: randomBytes(32)
+                        },
+                        [sendType]: {
+                            message: {
+                                protocolMessage: {
+                                    key: fullMsg.key,
+                                    type: 25
+                                }
+                            }
+                        }
+                    }, {
+                        userJid
+                    });
+                    await relayMessage(id, mentionMsg.message, {
+                        additionalNodes: [
+                            {
+                                tag: 'meta',
+                                attrs: isGroup ?
+                                    { is_group_status_mention: 'true' } :
+                                    { is_status_mention: 'true' },
+                                content: undefined
+                            }
+                        ]
+                    });
+                    if (config.emitOwnEvents) {
+                        process.nextTick(async () => {
+                            await messageMutex.mutex(() => upsertMessage(mentionMsg, 'append'));
+                        });
+                    }
+                    await delay(delayMs);
+                }
+                return fullMsg;
+            }
             if (typeof content === 'object' &&
                 'disappearingMessagesInChat' in content &&
                 typeof content['disappearingMessagesInChat'] !== 'undefined' &&
@@ -1427,12 +1556,20 @@ export const makeMessagesSocket = (config) => {
                     });
                 }
                 else if (isAiMsg) {
+                    // [Ported from @itsliaaa/baileys] AI label only allowed in private chat
+                    if (!(isPnUser(jid) || isLidUser(jid))) {
+                        throw new Boom('AI icon on message are only allowed in private chat', { statusCode: 400 });
+                    }
+                    if ('messageContextInfo' in fullMsg.message && !!fullMsg.message.messageContextInfo) {
+                        fullMsg.message.messageContextInfo.supportPayload = BIZ_BOT_SUPPORT_PAYLOAD;
+                    }
                     additionalNodes.push({
                         tag: 'bot',
                         attrs: {
                             biz_bot: '1'
                         }
                     });
+                    delete content.ai;
                 }
                 await relayMessage(jid, fullMsg.message, {
                     messageId: fullMsg.key.id,
@@ -1448,6 +1585,42 @@ export const makeMessagesSocket = (config) => {
                     process.nextTick(async () => {
                         await messageMutex.mutex(() => upsertMessage(fullMsg, 'append'));
                     });
+                }
+                // [Ported from @itsliaaa/baileys] auto-relay album media (messageAssociation MEDIA_ALBUM)
+                if ('album' in content) {
+                    const { delayMs = 1500 } = options;
+                    for (const albumMedia of content.album) {
+                        const albumMsg = await generateWAMessage(jid, albumMedia, {
+                            logger,
+                            userJid,
+                            upload: waUploadToServer,
+                            mediaCache: config.mediaCache,
+                            options: config.options,
+                            ...options,
+                            messageId: generateMessageIDV2(userJid)
+                        });
+                        if (!hasValidAlbumMedia(normalizeMessageContent(albumMsg.message))) {
+                            throw new Boom('Invalid message type for album', { statusCode: 400 });
+                        }
+                        albumMsg.message.messageContextInfo ||= {};
+                        albumMsg.message.messageContextInfo.messageAssociation = {
+                            parentMessageKey: fullMsg.key,
+                            associationType: AssociationType.MEDIA_ALBUM
+                        };
+                        await relayMessage(jid, albumMsg.message, {
+                            messageId: albumMsg.key.id,
+                            useCachedGroupMetadata: options.useCachedGroupMetadata,
+                            statusJidList: options.statusJidList,
+                            additionalAttributes,
+                            additionalNodes
+                        });
+                        if (config.emitOwnEvents) {
+                            process.nextTick(async () => {
+                                await messageMutex.mutex(() => upsertMessage(albumMsg, 'append'));
+                            });
+                        }
+                        await delay(delayMs);
+                    }
                 }
                 return fullMsg;
             }

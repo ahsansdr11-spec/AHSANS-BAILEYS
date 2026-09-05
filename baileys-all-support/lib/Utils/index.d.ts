@@ -22,3 +22,5 @@ export * from './stanza-ack.js';
 export * from './rich-messages.js';
 export * from './sticker-pack.js';
 //# sourceMappingURL=index.d.ts.map
+export * from './rich-message-utils.js';
+export * from './use-single-file-auth-state.js';

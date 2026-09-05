@@ -90,5 +90,69 @@ async function demo(sock) {
   // atau:
   // await sock.sendStatusMention({ text: 'Status dengan mention' }, [target]);
 
+  // ════════════════════════════════════════════════════════════
+  // v1.1.0 — port Sairidev/@itsliaaa (19 content type baru)
+  // ════════════════════════════════════════════════════════════
+
+  // 9) 🔘 Buttons + templateButtons + nativeFlow (interaktif)
+  // await sock.sendMessage(target, {
+  //   buttons: [
+  //     { id: 'btn1', text: 'Halo' },                            // quick reply
+  //     { url: 'https://example.com', text: 'Buka Web' },        // cta_url
+  //     { copy: 'KODE123', text: 'Copy Kode' },                  // cta_copy
+  //     { call: '+628123456789', text: 'Telepon' },              // cta_call
+  //     { text: 'Pilih Menu', sections: [{ title: 'Menu', rows: [{ title: 'A', rowId: 'a' }] }] }, // single_select
+  //   ],
+  //   text: 'Silakan pilih',
+  //   footer: 'baileys-all-support',
+  // });
+
+  // 10) 💻 Rich message: kode berwarna & tabel (AI rich response)
+  // await sock.sendMessage(target, { code: 'const hi = "world";', language: 'javascript' });
+  // await sock.sendMessage(target, { title: 'Laporan', table: [['Nama', 'Skor'], ['A', '90'], ['B', '85']] });
+  // await sock.sendMessage(target, { links: [{ url: 'https://a.com', text: 'Tautan A' }] });
+
+  // 11) 🃏 Carousel cards (header bisa product/image/video)
+  // await sock.sendMessage(target, {
+  //   text: 'Pilihan hari ini',
+  //   cards: [{
+  //     businessOwnerJid: '62812xxx@s.whatsapp.net',
+  //     product: { productImage: { url: './produk.jpg' }, title: 'Produk A' },
+  //     caption: 'Diskon 20%',
+  //     footer: 'Rp99.000',
+  //     nativeFlow: [{ id: 'buy1', text: 'Beli' }],
+  //   }],
+  // });
+
+  // 12) 🎁 Sticker pack (itsliaaa port — konversi WebP otomatis)
+  // await sock.sendMessage(target, {
+  //   stickers: {
+  //     name: 'Pack Lucu',
+  //     cover: { url: './cover.png' },
+  //     stickers: [{ data: { url: './s1.png' }, emojis: ['😂'] }, { data: { url: './s2.png' } }],
+  //   },
+  // });
+
+  // 13) 🧰 Wraps & utilitas baru
+  // await sock.sendMessage(target, { text: 'sekali lihat', viewOnceV2: true });
+  // await sock.sendMessage(target, { text: 'spoiler!', spoiler: true });
+  // await sock.sendMessage(target, { text: 'status grup', groupStatus: true });
+  // await sock.sendMessage(target, { text: 'pesan AI', ai: true });          // private chat saja
+  // await sock.sendMessage(target, { keep: msg.key, type: 1 });              // keep in chat
+  // await sock.sendMessage(target, { poll: { name: 'Kuis', values: ['a','b'], pollType: 1, correctAnswer: 'a' } }); // quiz
+
+  // 14) 📦 Album: satu panggilan, media di-relay otomatis
+  // await sock.sendMessage(target, {
+  //   album: [{ image: { url: './a.jpg' } }, { image: { url: './b.jpg' } }, { video: { url: './c.mp4' } }],
+  // });
+
+  // 15) 📣 Status mentions: kirim status + mention banyak jid/grup sekaligus
+  // await sock.sendMessage([target, '62812-group@g.us'], { text: 'Halo semua!' });
+
+  // 16) 🔐 Auth state 1 file (LRU cache + anti race)
+  // import { useSingleFileAuthState } from 'baileys-all-support';
+  // const { state, saveCreds } = await useSingleFileAuthState('./auth.json');
+  // const sock = makeWASocket({ auth: state }); sock.ev.on('creds.update', saveCreds);
+
   console.log('Demo selesai ✅');
 }

@@ -8,12 +8,12 @@ import { join } from 'path';
 import { Readable, Transform } from 'stream';
 import { URL } from 'url';
 import { proto } from '../../WAProto/index.js';
-import { DEFAULT_ORIGIN, MEDIA_HKDF_KEY_MAPPING, MEDIA_PATH_MAP } from '../Defaults/index.js';
+import { DEFAULT_ORIGIN, MEDIA_HKDF_KEY_MAPPING, MEDIA_PATH_MAP, NEWSLETTER_MEDIA_PATH_MAP } from '../Defaults/index.js';
 import { getBinaryNodeChild, getBinaryNodeChildBuffer, jidNormalizedUser } from '../WABinary/index.js';
 import { aesDecryptGCM, aesEncryptGCM, hkdf } from './crypto.js';
 import { generateMessageIDV2 } from './generics.js';
 const getTmpFilesDirectory = () => tmpdir();
-const getImageProcessingLibrary = async () => {
+export const getImageProcessingLibrary = async () => {
     //@ts-ignore
     const [jimp, sharp] = await Promise.all([import('jimp').catch(() => { }), import('sharp').catch(() => { })]);
     if (sharp) {
@@ -641,7 +641,7 @@ const uploadMedia = async (params, logger) => {
     }
 };
 export const getWAUploadToServer = ({ customUploadHosts, fetchAgent, logger, options }, refreshMediaConn) => {
-    return async (filePath, { mediaType, fileEncSha256B64, timeoutMs }) => {
+    return async (filePath, { mediaType, fileEncSha256B64, timeoutMs, newsletter }) => {
         // send a query JSON to obtain the url & auth token to upload our media
         let uploadInfo = await refreshMediaConn(false);
         let urls;
@@ -662,7 +662,10 @@ export const getWAUploadToServer = ({ customUploadHosts, fetchAgent, logger, opt
         for (const { hostname } of hosts) {
             logger.debug(`uploading to "${hostname}"`);
             const auth = encodeURIComponent(uploadInfo.auth);
-            const url = `https://${hostname}${MEDIA_PATH_MAP[mediaType]}/${fileEncSha256B64}?auth=${auth}&token=${fileEncSha256B64}`;
+            // [Ported from @itsliaaa/baileys] newsletter uploads use "/m1/" paths + server-side thumbnail
+            const mediaPathMap = newsletter ? NEWSLETTER_MEDIA_PATH_MAP : MEDIA_PATH_MAP;
+            const serverThumb = newsletter ? '&server_thumb_gen=1' : '';
+            const url = `https://${hostname}${mediaPathMap[mediaType]}/${fileEncSha256B64}?auth=${auth}&token=${fileEncSha256B64}${serverThumb}`;
             let result;
             try {
                 result = await uploadMedia({
@@ -678,7 +681,10 @@ export const getWAUploadToServer = ({ customUploadHosts, fetchAgent, logger, opt
                         directPath: result.direct_path,
                         meta_hmac: result.meta_hmac,
                         fbid: result.fbid,
-                        ts: result.ts
+                        ts: result.ts,
+                        // [Ported from @itsliaaa/baileys] newsletter server-generated thumbnail info
+                        thumbnailDirectPath: result.thumbnail_info?.thumbnail_direct_path,
+                        thumbnailSha256: result.thumbnail_info?.thumbnail_sha256
                     };
                     break;
                 }

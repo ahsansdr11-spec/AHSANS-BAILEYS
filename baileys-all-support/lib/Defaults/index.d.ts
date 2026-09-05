@@ -79,3 +79,7 @@ export declare const TimeMs: {
     Week: number;
 };
 //# sourceMappingURL=index.d.ts.map
+// [Ported from @itsliaaa/baileys]
+export declare const LEXER_REGEX: RegExp;
+export declare const NEWSLETTER_MEDIA_PATH_MAP: Record<string, string>;
+export declare const BIZ_BOT_SUPPORT_PAYLOAD: string;

@@ -69,7 +69,7 @@ Dicari sedalam-dalamnya: npm (`hanzo-baileys`, `@hanzo/baileys`, `hanzo-md`, `ha
 | **HanzoBotz / HANZO-MD** (asli KazeDevID 2022, repo dihapus; fork `Yuri-Neko/HanzoBotz` masih hidup) | — | **`@adiwajshing/baileys@^4.4.0`** (zaman purba, 2022) |
 
 **Profil HanzOfc:**
-- Developer Indonesia, identitas **HanzOfc** — Telegram **t.me/HanzOfc**, situs **HanzOfc.com**. **Tidak punya akun GitHub publik & tidak publish paket npm** (semua varian `hanzofc*` = 404) — base botnya beredar via Telegram/klon-an repo orang.
+- Developer Indonesia, identitas **HanzOfc** — Telegram **@hanzo_124** *(dikoreksi 05-09-2026: handle asli beliau adalah @hanzo_124; t.me/HanzOfc yang beredar di file base = handle lama/tidak aktif)*, situs **HanzOfc.com**. **Tidak punya akun GitHub publik & tidak publish paket npm** (semua varian `hanzofc*` = 404) — base botnya beredar via Telegram/klon-an repo orang.
 - Fitur base HanzOfc-Bot: plugin hot-reload tanpa restart, jadibot (kloning via pairing code), button interaktif (quick reply/URL/call/copy/list), auto-join channel WA, dukungan LID, multi-level owner, antilink, AFK.
 - Komentar author reupload: *"masih akan terus dikembangkan"*.
 

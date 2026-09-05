@@ -2,9 +2,9 @@
 
 # 🟢 baileys-all-support
 
-**Baileys "ALL SUPPORT" — gabungan resmi [WhiskeySockets/Baileys](https://github.com/WhiskeySockets/Baileys) `v7.0.0-rc14` × [ourin-baileys](https://www.npmjs.com/package/ourin-baileys) `v9.0.21`**
+**Baileys "ALL SUPPORT" — gabungan resmi [WhiskeySockets/Baileys](https://github.com/WhiskeySockets/Baileys) `v7.0.0-rc14` × [ourin-baileys](https://www.npmjs.com/package/ourin-baileys) `v9.0.21` × fitur [@itsliaaa/baileys](https://www.npmjs.com/package/@itsliaaa/baileys) `0.3.18-final` (baileys-nya bot Sairidev; patch Shiroine sudah 100% terserap rc14)**
 
-*The "all-support" Baileys build — a deep, file-by-file 3-way merge of upstream WhiskeySockets Baileys and the ourin-baileys modded fork. Every upstream fix. Every ourin feature. One package.*
+*The "all-support" Baileys build — a deep, file-by-file 3-way merge of upstream WhiskeySockets Baileys and the ourin-baileys modded fork, plus a full feature port from @itsliaaa/baileys (Sairidev's engine). Every upstream fix. Every ourin feature. 19 extra content types. One package.*
 
 [![Node](https://img.shields.io/badge/node-%3E%3D20.0.0-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![ESM](https://img.shields.io/badge/ESM-only-F7DF1E?logo=javascript&logoColor=black)](#)
@@ -13,6 +13,21 @@
 </div>
 
 ---
+
+## ✨ Baru di v1.1.0 (port Sairidev/@itsliaaa + bugfix)
+
+**19 content-type baru** di `sendMessage()`/`generateWAMessageContent()`:
+`raw` (passthrough proto), `code` / `links` / `table` / `richResponse` (AI rich message — kode berwarna & tabel, **+2 bugfix vs upstream**: crash `const` reassign & payload yang dibuang proto), `stickers` (sticker pack + cache + konversi WebP otomatis), `keep` (keep in chat), `flowReply`, `ptv`, quiz poll (`pollType: 1`), `pollResult`, `pollUpdate`, `paymentInviteServiceType`, `orderText`, `buttons` (+ shortcut `single_select`), `sections`, `templateButtons`, `nativeFlow` (quick reply/copy/url/call + offer & bottom-sheet), `cards` (carousel + header product), `requestPaymentFrom`, `invoiceNote`.
+
+**Opsi context baru**: `externalAdReply` langsung, `groupStatus`, `spoiler`, `interactiveAsTemplate`, `ephemeral`, `isLottie`, `viewOnceV2`, `viewOnceV2Extension`, `ai` (label AI — private chat saja).
+
+**Perbaikan penting**:
+- 🐛 **Media newsletter ditolak server** → upload kini lewat path `/m1/` (`NEWSLETTER_MEDIA_PATH_MAP`) + raw upload + `server_thumb_gen=1` (thumbnail dibuat server).
+- 🐛 Rich message (kode/tabel) upstream itsliaaa **crash & payload-nya dibuang proto** — dua-duanya diperbaiki di sini.
+- 📦 **Auto-relay album**: kirim `{ album: [ {image}, {video}, … ] }` sekali panggil — media dikirim berurutan dengan `messageAssociation MEDIA_ALBUM`.
+- 📣 **Status mentions**: `sendMessage([jid, groupJid, …], content)` menyebut semua + mengirim `statusMentionMessage` per penerima.
+- 🔐 **`useSingleFileAuthState(file)`** — auth state 1 file JSON, LRU cache, mutex anti race, atomic write.
+- 🧩 Node `meta` otomatis (pin/keep/reaction/vote/group status), attr `native_flow_name`, `additionalNodes` utk stanza newsletter, enum `ButtonType`/`CarouselCardType`/`ListType`/`AssociationType`.
 
 ## 📖 Indonesian / Bahasa Indonesia
 
@@ -125,6 +140,21 @@ sock.ev.on('messages.upsert', async ({ messages }) => {
 Contoh lainnya (newsletter, sticker pack, tabel, status mention, VoIP): lihat [`example/basic.js`](example/basic.js).
 
 ---
+
+## ✨ New in v1.1.0 (Sairidev/@itsliaaa port + bugfixes)
+
+**19 new content types** in `sendMessage()`/`generateWAMessageContent()`:
+`raw` (proto passthrough), `code` / `links` / `table` / `richResponse` (AI rich messages — syntax-highlighted code & tables, **includes 2 bugfixes vs upstream**: a const-reassign crash and a silently-dropped payload), `stickers` (sticker pack w/ cache & auto WebP conversion), `keep`, `flowReply`, `ptv`, quiz polls (`pollType: 1`), `pollResult`, `pollUpdate`, `paymentInviteServiceType`, `orderText`, `buttons` (+ `single_select` shortcut), `sections`, `templateButtons`, `nativeFlow` (quick reply/copy/url/call + offer & bottom-sheet), `cards` (carousel + product header), `requestPaymentFrom`, `invoiceNote`.
+
+**New context options**: direct `externalAdReply`, `groupStatus`, `spoiler`, `interactiveAsTemplate`, `ephemeral`, `isLottie`, `viewOnceV2`, `viewOnceV2Extension`, `ai` (AI label — private chats only).
+
+**Key fixes**:
+- 🐛 **Newsletter media rejected** → uploads now use `/m1/` paths (`NEWSLETTER_MEDIA_PATH_MAP`) + raw upload + `server_thumb_gen=1`.
+- 🐛 Upstream itsliaaa rich messages **crashed & were dropped by proto** — both fixed here.
+- 📦 **Album auto-relay**: send `{ album: [...] }` in one call — media relayed sequentially with `messageAssociation MEDIA_ALBUM`.
+- 📣 **Status mentions**: `sendMessage([jid, groupJid, …], content)`.
+- 🔐 **`useSingleFileAuthState(file)`** — single-file JSON auth state, LRU cache, race-safe mutex, atomic writes.
+- 🧩 Auto `meta` nodes (pin/keep/reaction/vote/group status), `native_flow_name` attr, `additionalNodes` for newsletter stanzas, exported enums `ButtonType`/`CarouselCardType`/`ListType`/`AssociationType`.
 
 ## 📖 English
 

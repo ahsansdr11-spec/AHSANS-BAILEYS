@@ -1,14 +1,16 @@
 import { Boom } from '@hapi/boom';
 import { randomBytes } from 'crypto';
+import { zip } from 'fflate';
 import { createReadStream, promises as fs } from 'fs';
 import {} from 'stream';
 import { proto } from '../../WAProto/index.js';
 import { CALL_AUDIO_PREFIX, CALL_VIDEO_PREFIX, MEDIA_KEYS, URL_REGEX, WA_DEFAULT_EPHEMERAL } from '../Defaults/index.js';
-import { WAMessageStatus, WAProto } from '../Types/index.js';
-import { isJidGroup, isJidNewsletter, isJidStatusBroadcast, jidNormalizedUser } from '../WABinary/index.js';
+import { ButtonHeaderType, ButtonType, CarouselCardType, ListType, WAMessageStatus, WAProto } from '../Types/index.js';
+import { isLidUser, isJidGroup, isJidNewsletter, isJidStatusBroadcast, isPnUser, jidNormalizedUser } from '../WABinary/index.js';
 import { sha256 } from './crypto.js';
 import { generateMessageIDV2, getKeyAuthor, unixTimestampSeconds } from './generics.js';
-import { downloadContentFromMessage, encryptedStream, generateThumbnail, getAudioDuration, getAudioWaveform, getRawMediaUploadData } from './messages-media.js';
+import { downloadContentFromMessage, encryptedStream, generateThumbnail, getAudioDuration, getAudioWaveform, getImageProcessingLibrary, getRawMediaUploadData, getStream, toBuffer } from './messages-media.js';
+import { prepareRichResponseMessage } from './rich-message-utils.js';
 import { shouldIncludeReportingToken } from './reporting-utils.js';
 const MIMETYPE_MAP = {
     image: 'image/jpeg',
@@ -270,10 +272,408 @@ export const hasNonNullishProperty = (message, key) => {
 function hasOptionalProperty(obj, key) {
     return typeof obj === 'object' && obj !== null && key in obj && obj[key] !== null;
 }
+const CONCURRENCY_LIMIT = 15;
+// [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 31-01-26 --- Extract product message into a standalone function so it can also be reused as the header for interactive messages
+const prepareProductMessage = async (message, options) => {
+    if (!message.businessOwnerJid) {
+        throw new Boom('"businessOwnerJid" is missing from the content', { statusCode: 400 });
+    }
+    const { imageMessage } = await prepareWAMessageMedia({ image: message.image || message.product.productImage }, options);
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 01-02-26 --- Add product message default value
+    const { image, ...content } = message;
+    content.product = {
+        currencyCode: 'IDR',
+        priceAmount1000: 1000,
+        title: 'baileys-all-support',
+        ...message.product,
+        productImage: imageMessage
+    };
+    return content;
+};
+/**
+ * [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Note 30-01-26
+ * ---
+ * Credits: Work on ensuring stickerPackMessage fields are valid by @jlucaso1 (https://github.com/jlucaso1).
+ * based on https://github.com/WhiskeySockets/Baileys/pull/1561
+ */
+// [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 21-04-26 --- Enhanced prepareStickerPackMessage
+const prepareStickerPackMessage = async (message, options) => {
+    const { cover, stickers = [], name = '📦 Sticker Pack', publisher = 'baileys-all-support', description = 'Sticker pack' } = message;
+    if (stickers.length > 60) {
+        throw new Boom('Sticker pack exceeds the maximum limit of 60 stickers', { statusCode: 400 });
+    }
+    if (stickers.length === 0) {
+        throw new Boom('Sticker pack must contain at least one sticker', { statusCode: 400 });
+    }
+    if (!cover) {
+        throw new Boom('Sticker pack must contain a cover', { statusCode: 400 });
+    }
+    const logger = options.logger;
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 01-02-26 --- Add caching for sticker pack
+    let cacheableKey = false;
+    if (Array.isArray(stickers) && stickers.length && options.mediaCache) {
+        const urls = [];
+        for (let i = 0; i < stickers.length; i++) {
+            const data = stickers[i].data;
+            if (typeof data === 'object' && data?.url) {
+                urls.push(data.url);
+            }
+        }
+        if (urls.length > 0) {
+            cacheableKey = 'sticker:' + urls.join('@');
+        }
+    }
+    if (cacheableKey) {
+        const mediaBuff = await options.mediaCache.get(cacheableKey);
+        if (mediaBuff) {
+            logger?.debug({ cacheableKey }, 'got media cache hit');
+            return proto.Message.StickerPackMessage.decode(mediaBuff);
+        }
+    }
+    const lib = await getImageProcessingLibrary();
+    const hasSharp = 'sharp' in lib && !!lib.sharp?.default;
+    const hasImage = 'image' in lib && !!lib.image?.Transformer;
+    const hasJimp = 'jimp' in lib && !!lib.jimp?.Jimp;
+    if (!hasSharp && !hasImage) {
+        throw new Boom('No image processing library (sharp or @napi-rs/image) available for converting sticker to WebP.');
+    }
+    const stickerPackIdValue = generateMessageIDV2();
+    const stickerData = {};
+    const stickerMetadata = new Array(stickers.length);
+    for (let i = 0; i < stickers.length; i += CONCURRENCY_LIMIT) {
+        const promises = [];
+        const chunkEnd = Math.min(i + CONCURRENCY_LIMIT, stickers.length);
+        for (let j = i; j < chunkEnd; j++) {
+            promises.push((async (index) => {
+                const sticker = stickers[index];
+                const { stream } = await getStream(sticker.data);
+                const buffer = await toBuffer(stream);
+                let webpBuffer;
+                let isAnimated = false;
+                if (isWebPBuffer(buffer)) {
+                    webpBuffer = buffer;
+                    isAnimated = isAnimatedWebP(buffer);
+                }
+                else if (hasSharp) {
+                    webpBuffer = await lib.sharp.default(buffer)
+                        .resize(512, 512, { fit: 'inside' })
+                        .webp({ quality: 80 })
+                        .toBuffer();
+                }
+                else {
+                    webpBuffer = await new lib.image.Transformer(buffer)
+                        .resize(512, 512)
+                        .webp(80);
+                }
+                if (webpBuffer.length > 1024 * 1024) {
+                    throw new Boom(`Sticker at index ${index} exceeds the 1MB size limit`, { statusCode: 400 });
+                }
+                const hash = sha256(webpBuffer).toString('base64').replace(/\//g, '-');
+                const fileName = `${hash}.webp`;
+                stickerData[fileName] = [new Uint8Array(webpBuffer), { level: 0 }];
+                stickerMetadata[index] = {
+                    fileName,
+                    mimetype: 'image/webp',
+                    isAnimated,
+                    emojis: sticker.emojis || ['✨'],
+                    accessibilityLabel: sticker.accessibilityLabel || '‎'
+                };
+            })(j));
+        }
+        await Promise.all(promises);
+    }
+    const trayIconFileName = `${stickerPackIdValue}.webp`;
+    const { stream: coverStream } = await getStream(cover);
+    const coverBuffer = await toBuffer(coverStream);
+    let coverWebpBuffer;
+    if (isWebPBuffer(coverBuffer)) {
+        coverWebpBuffer = coverBuffer;
+    }
+    else if (hasSharp) {
+        coverWebpBuffer = await lib.sharp.default(coverBuffer)
+            .resize(512, 512, { fit: 'inside' })
+            .webp({ quality: 80 })
+            .toBuffer();
+    }
+    else {
+        coverWebpBuffer = await new lib.image.Transformer(coverBuffer)
+            .resize(512, 512)
+            .webp(80);
+    }
+    stickerData[trayIconFileName] = [new Uint8Array(coverWebpBuffer), { level: 0 }];
+    const zipBuffer = await new Promise((resolve, reject) => {
+        zip(stickerData, (error, data) => error ? reject(error) : resolve(Buffer.from(data)));
+    });
+    const stickerPackUpload = await encryptedStream(zipBuffer, 'sticker-pack', {
+        logger,
+        opts: options.options
+    });
+    let stickerPackUploadResult;
+    try {
+        stickerPackUploadResult = await options.upload(stickerPackUpload.encFilePath, {
+            fileEncSha256B64: stickerPackUpload.fileEncSha256.toString('base64'),
+            mediaType: 'sticker-pack',
+            timeoutMs: options.mediaUploadTimeoutMs
+        });
+    }
+    finally {
+        fs.unlink(stickerPackUpload.encFilePath).catch(() => logger?.warn('failed to remove tmp file'));
+    }
+    const obj = {
+        name,
+        publisher,
+        stickerPackId: stickerPackIdValue,
+        packDescription: description,
+        stickerPackOrigin: proto.Message.StickerPackMessage.StickerPackOrigin.USER_CREATED,
+        stickerPackSize: zipBuffer.length,
+        stickers: stickerMetadata,
+        fileSha256: stickerPackUpload.fileSha256,
+        fileEncSha256: stickerPackUpload.fileEncSha256,
+        mediaKey: stickerPackUpload.mediaKey,
+        directPath: stickerPackUploadResult.directPath,
+        fileLength: stickerPackUpload.fileLength,
+        mediaKeyTimestamp: unixTimestampSeconds(),
+        trayIconFileName
+    };
+    try {
+        let thumbnailBuffer;
+        if (hasSharp) {
+            thumbnailBuffer = await lib.sharp.default(coverBuffer).resize(252, 252).jpeg().toBuffer();
+        }
+        else if (hasImage) {
+            thumbnailBuffer = await new lib.image.Transformer(coverBuffer).resize(252, 252).jpeg();
+        }
+        else if (hasJimp) {
+            const jimpImage = await lib.jimp.Jimp.read(coverBuffer);
+            thumbnailBuffer = await jimpImage.resize({ w: 252, h: 252 }).getBuffer('image/jpeg');
+        }
+        else {
+            throw new Error('No image processing library available for thumbnail generation');
+        }
+        if (!thumbnailBuffer || thumbnailBuffer.length === 0) {
+            throw new Error('Failed to generate thumbnail buffer');
+        }
+        const thumbUpload = await encryptedStream(thumbnailBuffer, 'thumbnail-sticker-pack', {
+            logger,
+            opts: options.options,
+            mediaKey: stickerPackUpload.mediaKey
+        });
+        let thumbUploadResult;
+        try {
+            thumbUploadResult = await options.upload(thumbUpload.encFilePath, {
+                fileEncSha256B64: thumbUpload.fileEncSha256.toString('base64'),
+                mediaType: 'thumbnail-sticker-pack',
+                timeoutMs: options.mediaUploadTimeoutMs
+            });
+        }
+        finally {
+            fs.unlink(thumbUpload.encFilePath).catch(() => logger?.warn('failed to remove tmp file'));
+        }
+        Object.assign(obj, {
+            thumbnailDirectPath: thumbUploadResult.directPath,
+            thumbnailSha256: thumbUpload.fileSha256,
+            thumbnailEncSha256: thumbUpload.fileEncSha256,
+            thumbnailHeight: 252,
+            thumbnailWidth: 252,
+            imageDataHash: sha256(thumbnailBuffer).toString('base64')
+        });
+    }
+    catch (error) {
+        logger?.warn(`Thumbnail generation failed: ${error}`);
+    }
+    if (cacheableKey) {
+        logger?.debug({ cacheableKey }, 'set cache (background)');
+        options.mediaCache.set(cacheableKey, WAProto.Message.StickerPackMessage.encode(obj).finish());
+    }
+    return WAProto.Message.StickerPackMessage.fromObject(obj);
+};
+// [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 30-01-26 --- Add native flow button helper for interactive message
+const prepareNativeFlowButtons = (message) => {
+    const buttons = message.nativeFlow;
+    const isButtonsFieldArray = Array.isArray(buttons);
+    const correctedField = isButtonsFieldArray ? buttons : buttons.buttons;
+    const messageParamsJson = {};
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 31-01-26 --- Add offer and options inside interactive message
+    if (hasOptionalProperty(message, 'offerText') && !!message.offerText) {
+        Object.assign(messageParamsJson, {
+            limited_time_offer: {
+                text: message.offerText || 'baileys-all-support',
+                url: message.offerUrl,
+                copy_code: message.offerCode,
+                expiration_time: message.offerExpiration
+            }
+        });
+    }
+    if (hasOptionalProperty(message, 'optionText') && !!message.optionText) {
+        Object.assign(messageParamsJson, {
+            bottom_sheet: {
+                in_thread_buttons_limit: 1,
+                divider_indices: Array.from({ length: correctedField.length }, (_, index) => index),
+                list_title: message.optionTitle || '📄 Select Options',
+                button_title: message.optionText
+            }
+        });
+    }
+    return {
+        buttons: correctedField.map(button => {
+            const buttonText = button.text || button.buttonText;
+            const buttonIcon = button.icon?.toUpperCase();
+            if (hasOptionalProperty(button, 'id') && !!button.id) {
+                return {
+                    name: 'quick_reply',
+                    buttonParamsJson: JSON.stringify({
+                        display_text: buttonText || '👉🏻 Click',
+                        id: button.id,
+                        icon: buttonIcon
+                    })
+                };
+            }
+            else if (hasOptionalProperty(button, 'copy') && !!button.copy) {
+                return {
+                    name: 'cta_copy',
+                    buttonParamsJson: JSON.stringify({
+                        display_text: buttonText || '📋 Copy',
+                        copy_code: button.copy,
+                        icon: buttonIcon
+                    })
+                };
+            }
+            else if (hasOptionalProperty(button, 'url') && !!button.url) {
+                return {
+                    name: 'cta_url',
+                    buttonParamsJson: JSON.stringify({
+                        display_text: buttonText || '🌐 Visit',
+                        url: button.url,
+                        merchant_url: button.url,
+                        webview_interaction: button.useWebview,
+                        icon: buttonIcon
+                    })
+                };
+            }
+            else if (hasOptionalProperty(button, 'call') && !!button.call) {
+                return {
+                    name: 'cta_call',
+                    buttonParamsJson: JSON.stringify({
+                        display_text: buttonText || '📞 Call',
+                        phone_number: button.call,
+                        icon: buttonIcon
+                    })
+                };
+            }
+            // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 12-03-26 --- Add "single_select" shortcut ＼⁠(⁠°⁠o⁠°⁠)⁠／
+            else if (hasOptionalProperty(button, 'sections') && !!button.sections) {
+                return {
+                    name: 'single_select',
+                    buttonParamsJson: JSON.stringify({
+                        title: buttonText || '📋 Select',
+                        sections: button.sections,
+                        icon: buttonIcon
+                    })
+                };
+            }
+            return button;
+        }),
+        messageParamsJson: JSON.stringify(messageParamsJson)
+    };
+};
+const isAnimatedWebP = (buffer) => {
+    // WebP must start with RIFF....WEBP
+    if (buffer.length < 12 ||
+        buffer[0] !== 0x52 ||
+        buffer[1] !== 0x49 ||
+        buffer[2] !== 0x46 ||
+        buffer[3] !== 0x46 ||
+        buffer[8] !== 0x57 ||
+        buffer[9] !== 0x45 ||
+        buffer[10] !== 0x42 ||
+        buffer[11] !== 0x50) {
+        return false;
+    }
+    ;
+    // Parse chunks starting after RIFF header (12 bytes)
+    let offset = 12;
+    while (offset < buffer.length - 8) {
+        const chunkFourCC = buffer.toString('ascii', offset, offset + 4);
+        const chunkSize = buffer.readUInt32LE(offset + 4);
+        if (chunkFourCC === 'VP8X') {
+            // VP8X extended header, check animation flag (bit 1 at offset+8)
+            const flagsOffset = offset + 8;
+            if (flagsOffset < buffer.length) {
+                const flags = buffer[flagsOffset];
+                if (flags & 0x02) {
+                    return true;
+                }
+                ;
+            }
+            ;
+        }
+        else if (chunkFourCC === 'ANIM' || chunkFourCC === 'ANMF') {
+            // ANIM or ANMF chunks indicate animation
+            return true;
+        }
+        ;
+        // Move to next chunk (chunk size + 8 bytes header, padded to even)
+        offset += 8 + chunkSize + (chunkSize % 2);
+    }
+    ;
+    return false;
+};
+/**
+ * Checks if a buffer is a WebP file
+ */
+const isWebPBuffer = (buffer) => {
+    return (buffer.length >= 12 &&
+        buffer[0] === 0x52 &&
+        buffer[1] === 0x49 &&
+        buffer[2] === 0x46 &&
+        buffer[3] === 0x46 &&
+        buffer[8] === 0x57 &&
+        buffer[9] === 0x45 &&
+        buffer[10] === 0x42 &&
+        buffer[11] === 0x50);
+};
+/**
+ * [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 30-01-26
+ * ---
+ * Determines whether a message should include a Biz Binary Node.
+ * A Biz Binary Node is added only for interactive messages
+ * such as buttons or other supported interactive types.
+ */
+// [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 06-02-26 --- Validate album message media to avoid bug 👀
+export const hasValidAlbumMedia = (message) => {
+    return !!(message.imageMessage ||
+        message.videoMessage);
+};
+export const hasValidInteractiveHeader = (message) => {
+    return !!(message.imageMessage ||
+        message.videoMessage ||
+        message.documentMessage ||
+        message.productMessage ||
+        message.locationMessage);
+};
+// [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 30-01-26 --- Validate carousel cards header to avoid bug 👀
+export const hasValidCarouselHeader = (message) => {
+    return !!(message.imageMessage ||
+        message.videoMessage ||
+        message.productMessage);
+};
 export const generateWAMessageContent = async (message, options) => {
     var _a, _b;
     let m = {};
-    if (hasNonNullishProperty(message, 'text')) {
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 30-01-26 --- Add "raw" boolean to send raw messages directly via generateWAMessage()
+    if (hasNonNullishProperty(message, 'raw')) {
+        delete message.raw;
+        return message;
+    }
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 09-04-26 --- Add support for code block and table with richResponseMessage
+    else if (hasNonNullishProperty(message, 'code') ||
+        hasNonNullishProperty(message, 'links') ||
+        hasNonNullishProperty(message, 'table') ||
+        hasNonNullishProperty(message, 'richResponse')) {
+        m = prepareRichResponseMessage(message);
+    }
+    
+    else if (hasNonNullishProperty(message, 'text')) {
         const extContent = { text: message.text };
         let urlInfo = message.linkPreview;
         if (typeof urlInfo === 'undefined') {
@@ -362,6 +762,10 @@ export const generateWAMessageContent = async (message, options) => {
             }
         }
     }
+    else if (hasNonNullishProperty(message, 'stickers')) {
+        m.stickerPackMessage = await prepareStickerPackMessage(message, options);
+    }
+    
     else if (hasNonNullishProperty(message, 'pin')) {
         m.pinInChatMessage = {};
         m.messageContextInfo = {};
@@ -370,6 +774,26 @@ export const generateWAMessageContent = async (message, options) => {
         m.pinInChatMessage.senderTimestampMs = Date.now();
         m.messageContextInfo.messageAddOnDurationInSecs = message.type === 1 ? message.time || 86400 : 0;
     }
+    else if (hasNonNullishProperty(message, 'keep')) {
+        m.keepInChatMessage = {};
+        m.keepInChatMessage.key = message.keep;
+        m.keepInChatMessage.keepType = message.type;
+        m.keepInChatMessage.timestampMs = Date.now();
+    }
+    else if (hasNonNullishProperty(message, 'flowReply')) {
+        m.interactiveResponseMessage = {
+            body: {
+                format: message.flowReply.format || proto.Message.InteractiveResponseMessage.Body.Format.DEFAULT,
+                text: message.flowReply.text
+            },
+            nativeFlowResponseMessage: {
+                name: message.flowReply.name,
+                paramsJson: message.flowReply.paramsJson || '{}',
+                version: message.flowReply.version || 1
+            }
+        };
+    }
+    
     else if (hasNonNullishProperty(message, 'buttonReply')) {
         switch (message.type) {
             case 'template':
@@ -392,6 +816,11 @@ export const generateWAMessageContent = async (message, options) => {
         const { videoMessage } = await prepareWAMessageMedia({ video: message.video }, options);
         m.ptvMessage = videoMessage;
     }
+    else if (hasOptionalProperty(message, 'ptv') && message.ptv) {
+        const { videoMessage } = await prepareWAMessageMedia({ video: message.video }, options);
+        m.ptvMessage = videoMessage;
+    }
+    
     else if (hasNonNullishProperty(message, 'product')) {
         const { imageMessage } = await prepareWAMessageMedia({ image: message.product.productImage }, options);
         m.productMessage = WAProto.Message.ProductMessage.create({
@@ -450,7 +879,21 @@ export const generateWAMessageContent = async (message, options) => {
             m.pollCreationMessageV2 = pollCreationMessage;
         }
         else {
-            if (message.poll.selectableCount === 1) {
+            // [Ported from @itsliaaa/baileys] quiz poll support
+            if (message.poll.pollType === 1) {
+                if (!message.poll.correctAnswer) {
+                    throw new Boom('No "correctAnswer" provided for quiz', { statusCode: 400 });
+                }
+                m.pollCreationMessageV5 = {
+                    ...pollCreationMessage,
+                    correctAnswer: {
+                        optionName: message.poll.correctAnswer.toString()
+                    },
+                    pollType: 1,
+                    selectableOptionsCount: 1
+                };
+            }
+            else if (message.poll.selectableCount === 1) {
                 //poll v3 is for single select polls
                 m.pollCreationMessageV3 = pollCreationMessage;
             }
@@ -460,6 +903,66 @@ export const generateWAMessageContent = async (message, options) => {
             }
         }
     }
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 08-02-26 --- Add poll result snapshot message
+    else if (hasNonNullishProperty(message, 'pollResult')) {
+        const pollResultSnapshotMessage = {
+            name: message.pollResult.name,
+            pollVotes: message.pollResult.votes.map(vote => ({
+                optionName: vote.name,
+                optionVoteCount: parseInt(vote.voteCount)
+            }))
+        };
+        if (message.pollResult.pollType === 1) {
+            pollResultSnapshotMessage.pollType = proto.Message.PollType.QUIZ;
+            m.pollResultSnapshotMessageV3 = pollResultSnapshotMessage;
+        }
+        else {
+            pollResultSnapshotMessage.pollType = proto.Message.PollType.POLL;
+            m.pollResultSnapshotMessage = pollResultSnapshotMessage;
+        }
+    }
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 08-02-26 --- Add poll update message
+    else if (hasNonNullishProperty(message, 'pollUpdate')) {
+        if (!message.pollUpdate.key) {
+            throw new Boom('Message key is required', { statusCode: 400 });
+        }
+        if (!message.pollUpdate.vote) {
+            throw new Boom('Encrypted vote payload is required', { statusCode: 400 });
+        }
+        m.pollUpdateMessage = {
+            metadata: message.pollUpdate.metadata,
+            pollCreationMessageKey: message.pollUpdate.key,
+            senderTimestampMs: Date.now(),
+            vote: message.pollUpdate.vote
+        };
+    }
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 01-02-26 --- Add payment invite message
+    else if (hasNonNullishProperty(message, 'paymentInviteServiceType')) {
+        m.paymentInviteMessage = {
+            expiryTimestamp: Date.now(),
+            serviceType: message.paymentInviteServiceType
+        };
+    }
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 01-02-26 --- Add order message
+    else if (hasNonNullishProperty(message, 'orderText')) {
+        if (!Buffer.isBuffer(message.thumbnail)) {
+            throw new Boom('Must provide thumbnail buffer in order message', { statusCode: 400 });
+        }
+        m.orderMessage = {
+            itemCount: 1,
+            messageVersion: 1,
+            orderTitle: 'baileys-all-support',
+            status: proto.Message.OrderMessage.OrderStatus.INQUIRY,
+            surface: proto.Message.OrderMessage.OrderSurface.CATALOG,
+            token: generateMessageIDV2(),
+            totalAmount1000: 1000,
+            totalCurrencyCode: 'IDR',
+            ...message,
+            message: message.orderText
+        };
+        delete m.orderMessage.orderText;
+    }
+    
     else if (hasNonNullishProperty(message, 'album')) {
         m.albumMessage = {
             expectedImageCount: message.album.expectedImageCount,
@@ -648,9 +1151,347 @@ export const generateWAMessageContent = async (message, options) => {
     else {
         m = await prepareWAMessageMedia(message, options);
     }
-    if (hasOptionalProperty(message, 'viewOnce') && !!message.viewOnce) {
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 30-01-26 --- Add interactive messages (buttonsMessage, listMessage, interactiveMessage, templateMessage, and carouselMessage)
+    if (hasNonNullishProperty(message, 'buttons')) {
+        const buttonsMessage = {
+            buttons: message.buttons.map(button => {
+                // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 12-03-26 --- Add "single_select" shortcut!
+                const buttonText = button.text || button.buttonText;
+                if (hasOptionalProperty(button, 'sections')) {
+                    return {
+                        nativeFlowInfo: {
+                            name: 'single_select',
+                            paramsJson: JSON.stringify({
+                                title: buttonText,
+                                sections: button.sections
+                            })
+                        },
+                        type: ButtonType.NATIVE_FLOW
+                    };
+                }
+                else if (hasOptionalProperty(button, 'name')) {
+                    return {
+                        nativeFlowInfo: {
+                            name: button.name,
+                            paramsJson: button.paramsJson
+                        },
+                        type: ButtonType.NATIVE_FLOW
+                    };
+                }
+                return {
+                    buttonId: button.id || button.buttonId,
+                    buttonText: typeof buttonText === 'string' ? { displayText: buttonText } : buttonText,
+                    type: button.type || ButtonType.RESPONSE
+                };
+            })
+        };
+        if (hasOptionalProperty(message, 'text')) {
+            buttonsMessage.contentText = message.text;
+            buttonsMessage.headerType = ButtonHeaderType.EMPTY;
+        }
+        else {
+            if (hasOptionalProperty(message, 'caption')) {
+                buttonsMessage.contentText = message.caption;
+            }
+            const type = Object.keys(m)[0].replace('Message', '').toUpperCase();
+            buttonsMessage.headerType = ButtonHeaderType[type];
+            Object.assign(buttonsMessage, m);
+        }
+        if (hasOptionalProperty(message, 'footer')) {
+            buttonsMessage.footerText = message.footer;
+        }
+        m = { buttonsMessage };
+    }
+    else if (hasNonNullishProperty(message, 'sections')) {
+        const listMessage = {
+            sections: message.sections,
+            buttonText: message.buttonText,
+            title: message.title,
+            footerText: message.footer,
+            description: message.text,
+            listType: ListType.SINGLE_SELECT
+        };
+        m = { listMessage };
+    }
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Note 03-02-26 --- This message type is shown on WhatsApp Web/Desktop and iOS (I guess ｡⁠◕⁠‿⁠◕⁠｡). On Android, it only appears in newsletter (so far ಥ⁠‿⁠ಥ)
+    else if (hasNonNullishProperty(message, 'templateButtons')) {
+        const hydratedTemplate = {
+            hydratedButtons: message.templateButtons.map((button, i) => {
+                const buttonText = button.text || button.buttonText;
+                if (hasOptionalProperty(button, 'id')) {
+                    return {
+                        index: i,
+                        quickReplyButton: {
+                            displayText: buttonText || '👉🏻 Click',
+                            id: button.id
+                        }
+                    };
+                }
+                else if (hasOptionalProperty(button, 'url')) {
+                    return {
+                        index: i,
+                        urlButton: {
+                            displayText: buttonText || '🌐 Visit',
+                            url: button.url
+                        }
+                    };
+                }
+                else if (hasOptionalProperty(button, 'call')) {
+                    return {
+                        index: i,
+                        callButton: {
+                            displayText: buttonText || '📞 Call',
+                            phoneNumber: button.call
+                        }
+                    };
+                }
+                button.index = button.index || i;
+                return button;
+            })
+        };
+        if (hasOptionalProperty(message, 'text')) {
+            hydratedTemplate.hydratedContentText = message.text;
+        }
+        else {
+            if (hasOptionalProperty(message, 'caption')) {
+                hydratedTemplate.hydratedTitleText = message.title;
+                hydratedTemplate.hydratedContentText = message.caption;
+            }
+            ;
+            Object.assign(hydratedTemplate, m);
+        }
+        if (hasOptionalProperty(message, 'footer')) {
+            hydratedTemplate.hydratedFooterText = message.footer;
+        }
+        hydratedTemplate.templateId = message.id || 'template-' + Date.now(); // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Note 04-02-26 --- Minimal templateId to satisfy WhatsApp (⁠ ⁠ꈍ⁠ᴗ⁠ꈍ⁠)
+        m = {
+            templateMessage: {
+                hydratedFourRowTemplate: hydratedTemplate,
+                hydratedTemplate: hydratedTemplate
+            }
+        };
+    }
+    else if (hasNonNullishProperty(message, 'nativeFlow')) {
+        const interactiveMessage = {
+            nativeFlowMessage: prepareNativeFlowButtons(message)
+        };
+        if (hasOptionalProperty(message, 'bizJid')) {
+            interactiveMessage.collectionMessage = {
+                bizJid: message.bizJid,
+                id: message.id,
+                messageVersion: 1
+            };
+        }
+        else if (hasOptionalProperty(message, 'shopSurface')) {
+            interactiveMessage.shopStorefrontMessage = {
+                surface: message.shopSurface,
+                id: message.id,
+                messageVersion: 1
+            };
+        }
+        if (hasOptionalProperty(message, 'text')) {
+            interactiveMessage.body = { text: message.text };
+        }
+        else {
+            if (hasOptionalProperty(message, 'caption')) {
+                const isValidHeader = hasValidInteractiveHeader(m);
+                if (!isValidHeader) {
+                    throw new Boom('Invalid media type for interactive message header', { statusCode: 400 });
+                }
+                interactiveMessage.header = {
+                    title: message.title || '',
+                    subtitle: message.subtitle || '',
+                    hasMediaAttachment: isValidHeader
+                };
+                interactiveMessage.body = { text: message.caption };
+            }
+            if (hasOptionalProperty(message, 'thumbnail') && !!message.thumbnail) {
+                interactiveMessage.jpegThumbnail = message.thumbnail;
+            }
+            Object.assign(interactiveMessage.header, m);
+        }
+        if (hasOptionalProperty(message, 'audioFooter')) {
+            const { audioMessage } = await prepareWAMessageMedia({
+                audio: message.audioFooter
+            }, options);
+            interactiveMessage.footer = {
+                audioMessage,
+                hasMediaAttachment: true
+            };
+        }
+        else if (hasOptionalProperty(message, 'footer')) {
+            interactiveMessage.footer = { text: message.footer };
+        }
+        m = { interactiveMessage };
+    }
+    else if (hasNonNullishProperty(message, 'cards')) {
+        const interactiveMessage = {
+            carouselMessage: {
+                cards: await Promise.all(message.cards.map(async (card) => {
+                    let carouselHeader = {};
+                    if (hasNonNullishProperty(card, 'product')) {
+                        carouselHeader.productMessage = await prepareProductMessage(card, options);
+                    }
+                    else {
+                        carouselHeader = await prepareWAMessageMedia(card, options).catch(() => ({}));
+                    }
+                    const isValidHeader = hasValidCarouselHeader(carouselHeader);
+                    if (!isValidHeader) {
+                        throw new Boom('Invalid media type for carousel card', { statusCode: 400 });
+                    }
+                    const carouselCard = {
+                        nativeFlowMessage: prepareNativeFlowButtons(card.nativeFlow ? card : [])
+                    };
+                    if (hasOptionalProperty(card, 'text')) {
+                        carouselCard.body = { text: card.text };
+                    }
+                    else {
+                        if (hasOptionalProperty(card, 'caption')) {
+                            carouselCard.header = {
+                                title: card.title || '',
+                                subtitle: card.subtitle || '',
+                                hasMediaAttachment: isValidHeader
+                            };
+                            carouselCard.body = { text: card.caption };
+                        }
+                        if (hasOptionalProperty(card, 'thumbnail') && !!card.thumbnail) {
+                            carouselCard.jpegThumbnail = card.thumbnail;
+                        }
+                        Object.assign(carouselCard.header, carouselHeader);
+                    }
+                    if (hasOptionalProperty(card, 'audioFooter')) {
+                        const { audioMessage } = await prepareWAMessageMedia({
+                            audio: card.audioFooter
+                        }, options);
+                        carouselCard.footer = {
+                            audioMessage,
+                            hasMediaAttachment: true
+                        };
+                    }
+                    else if (hasOptionalProperty(card, 'footer')) {
+                        carouselCard.footer = { text: card.footer };
+                    }
+                    return carouselCard;
+                })),
+                carouselCardType: CarouselCardType.UNKNOWN,
+                messageVersion: 1
+            }
+        };
+        if (hasOptionalProperty(message, 'text')) {
+            interactiveMessage.body = { text: message.text };
+        }
+        if (hasOptionalProperty(message, 'footer')) {
+            interactiveMessage.footer = { text: message.footer };
+        }
+        m = { interactiveMessage };
+    }
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 01-02-26 --- Add request payment message
+    else if (hasNonNullishProperty(message, 'requestPaymentFrom')) {
+        const requestPaymentMessage = {
+            amount: {
+                currencyCode: 'IDR',
+                offset: 1000,
+                value: 1000
+            },
+            amount1000: 1000,
+            currencyCodeIso4217: 'IDR',
+            expiryTimestamp: Date.now(),
+            noteMessage: m,
+            requestFrom: message.requestPaymentFrom,
+            ...message
+        };
+        delete requestPaymentMessage.requestPaymentFrom;
+        if (hasNonNullishProperty(m, 'extendedTextMessage') || hasNonNullishProperty(m, 'stickerMessage')) {
+            Object.assign(requestPaymentMessage.noteMessage, m);
+        }
+        else {
+            throw new Boom('Invalid message type for request payment note message', { statusCode: 400 });
+        }
+        m = { requestPaymentMessage };
+    }
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 01-02-26 --- Add invoice message
+    else if (hasNonNullishProperty(message, 'invoiceNote')) {
+        const attachment = m.imageMessage || m.documentMessage;
+        const type = Object.keys(m)[0].replace('Message', '').toUpperCase();
+        const invoiceMessage = {
+            attachmentType: proto.Message.InvoiceMessage.AttachmentType[type === 'DOCUMENT' ? 'PDF' : 'IMAGE'],
+            note: message.invoiceNote
+        };
+        if (attachment) {
+            const { directPath, fileEncSha256, fileSha256, jpegThumbnail = undefined, mediaKey, mediaKeyTimestamp, mimetype } = attachment;
+            Object.assign(invoiceMessage, {
+                attachmentDirectPath: directPath,
+                attachmentFileEncSha256: fileEncSha256,
+                attachmentFileSha256: fileSha256,
+                attachmentJpegThumbnail: jpegThumbnail,
+                attachmentMediaKey: mediaKey,
+                attachmentMediaKeyTimestamp: mediaKeyTimestamp,
+                attachmentMimetype: mimetype,
+                token: generateMessageIDV2()
+            });
+        }
+        else {
+            throw new Boom('Invalid media type for invoice message', { statusCode: 400 });
+        }
+        m = { invoiceMessage };
+    }
+    
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 30-01-26 --- Add "ephemeral" boolean to wrap message into ephemeralMessage like "viewOnce"
+    if (hasOptionalProperty(message, 'ephemeral') && !!message.ephemeral) {
+        m = { ephemeralMessage: { message: m } };
+        delete message.ephemeral;
+    }
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 16-05-26 --- Add wrap message into lottieStickerMessage by isLottie boolean
+    if (hasOptionalProperty(message, 'isLottie') && !!message.isLottie) {
+        m = { lottieStickerMessage: { message: m } };
+    }
+    else if (hasOptionalProperty(message, 'viewOnce') && !!message.viewOnce) {
         m = { viewOnceMessage: { message: m } };
     }
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 03-02-26 --- Add "viewOnceV2" boolean to wrap message into viewOnceMessageV2 like "viewOnce"
+    else if (hasOptionalProperty(message, 'viewOnceV2') && !!message.viewOnceV2) {
+        m = { viewOnceMessageV2: { message: m } };
+        delete message.viewOnceV2;
+    }
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 03-02-26 --- Add "viewOnceV2Extension" boolean to wrap message into viewOnceMessageV2Extension like "viewOnce"
+    else if (hasOptionalProperty(message, 'viewOnceV2Extension') && !!message.viewOnceV2Extension) {
+        m = { viewOnceMessageV2Extension: { message: m } };
+        delete message.viewOnceV2Extension;
+    }
+    
+
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 31-01-26 --- Add direct externalAdReply access (no need to create contextInfo first)
+    if (hasOptionalProperty(message, 'externalAdReply') && !!message.externalAdReply) {
+        const messageType = Object.keys(m)[0];
+        const key = m[messageType];
+        const content = message.externalAdReply;
+        if ('thumbnail' in content && !Buffer.isBuffer(content.thumbnail)) {
+            throw new Boom('Thumbnail must in buffer type', { statusCode: 400 });
+        }
+        if (!content.url || typeof content.url !== 'string') {
+        }
+        const externalAdReply = {
+            ...content,
+            body: content.body,
+            mediaType: content.mediaType || 1,
+            mediaUrl: content.url,
+            renderLargerThumbnail: content.largeThumbnail,
+            sourceUrl: content.url,
+            thumbnail: content.thumbnail,
+            thumbnailUrl: content.url ? content.url + '?update=' + Date.now() : undefined,
+            title: content.title || 'baileys-all-support'
+        };
+        delete externalAdReply.subTitle;
+        delete externalAdReply.largeThumbnail;
+        delete externalAdReply.url;
+        if ('contextInfo' in key && !!key.contextInfo) {
+            key.contextInfo.externalAdReply = { ...key.contextInfo.externalAdReply, ...externalAdReply };
+        }
+        else if (key) {
+            key.contextInfo = { externalAdReply };
+        }
+    }
+    
     if ((hasOptionalProperty(message, 'mentions') && message.mentions?.length) ||
         (hasOptionalProperty(message, 'mentionAll') && message.mentionAll)) {
         const messageType = Object.keys(m)[0];
@@ -691,6 +1532,50 @@ export const generateWAMessageContent = async (message, options) => {
             key.contextInfo = message.contextInfo;
         }
     }
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 31-01-26 --- Add "groupStatus" boolean to set contextInfo.isGroupStatus and wrap message into groupStatusMessageV2
+    if (hasOptionalProperty(message, 'groupStatus') && !!message.groupStatus) {
+        const messageType = Object.keys(m)[0];
+        const key = m[messageType];
+        if ('contextInfo' in key && !!key.contextInfo) {
+            key.contextInfo.isGroupStatus = message.groupStatus;
+        }
+        else if (key) {
+            key.contextInfo = {
+                isGroupStatus: message.groupStatus
+            };
+        }
+        m = { groupStatusMessageV2: { message: m } };
+        delete message.groupStatus;
+    }
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 06-05-26 --- Add "spoiler" boolean to set contextInfo.isSpoiler and wrap message into spoilerMessage
+    if (hasOptionalProperty(message, 'spoiler') && !!message.spoiler) {
+        const messageType = Object.keys(m)[0];
+        const key = m[messageType];
+        if ('contextInfo' in key && !!key.contextInfo) {
+            key.contextInfo.isSpoiler = message.spoiler;
+        }
+        else if (key) {
+            key.contextInfo = {
+                isSpoiler: message.spoiler
+            };
+        }
+        m = { spoilerMessage: { message: m } };
+        delete message.spoiler;
+    }
+    // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Changes 02-02-26 --- Add "interactiveAsTemplate" boolean to wrap interactiveMessage into templateMessage
+    else if (hasOptionalProperty(message, 'interactiveAsTemplate') && !!message.interactiveAsTemplate) {
+        if (!m.interactiveMessage) {
+            throw new Boom('Invalid message type for template', { statusCode: 400 }); // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Note 02-02-26 --- To avoid bug 👀
+        }
+        m = {
+            templateMessage: {
+                interactiveMessageTemplate: m.interactiveMessage,
+                templateId: message.id || 'template-' + Date.now() // [Ported from @itsliaaa/baileys (MIT) — merged into baileys-all-support] Lia@Note 04-02-26 --- Minimal templateId to satisfy WhatsApp (⁠ ⁠ꈍ⁠ᴗ⁠ꈍ⁠)
+            }
+        };
+        delete message.interactiveAsTemplate;
+    }
+    
     if (hasOptionalProperty(message, 'albumParentKey') && !!message.albumParentKey) {
         m.messageContextInfo = {
             ...m.messageContextInfo,
@@ -760,6 +1645,14 @@ export const generateWAMessageFromContent = (jid, message, options) => {
             //ephemeralSettingTimestamp: options.ephemeralOptions.eph_setting_ts?.toString()
         };
     }
+    // [Ported from @itsliaaa/baileys] inject deviceListMetadata inside messageContextInfo for private chats
+    if (messageContextInfo?.messageSecret && (isPnUser(jid) || isLidUser(jid))) {
+        messageContextInfo.deviceListMetadata = {
+            recipientKeyHash: randomBytes(10),
+            recipientTimestamp: unixTimestampSeconds()
+        };
+        messageContextInfo.deviceListMetadataVersion = 2;
+    }
     message = WAProto.Message.create(message);
     const messageJSON = {
         key: {
@@ -819,7 +1712,24 @@ export const normalizeMessageContent = (content) => {
             message?.editedMessage ||
             message?.associatedChildMessage ||
             message?.groupStatusMessage ||
-            message?.groupStatusMessageV2);
+            message?.groupStatusMessageV2 ||
+            // [Ported from @itsliaaa/baileys] extended future-proof wrappers
+            message?.botForwardedMessage ||
+            message?.botInvokeMessage ||
+            message?.botTaskMessage ||
+            message?.eventCoverImage ||
+            message?.groupMentionedMessage ||
+            message?.groupStatusMentionMessage ||
+            message?.limitSharingMessage ||
+            message?.lottieStickerMessage ||
+            message?.newsletterAdminProfileMessage ||
+            message?.newsletterAdminProfileMessageV2 ||
+            message?.newsletterAdminProfileStatusMessage ||
+            message?.pollCreationMessageV4 ||
+            message?.pollCreationOptionImageMessage ||
+            message?.questionMessage ||
+            message?.questionReplyMessage ||
+            message?.spoilerMessage);
     }
 };
 /**

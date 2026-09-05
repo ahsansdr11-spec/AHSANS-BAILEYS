@@ -28,6 +28,13 @@ export type WATextMessage = proto.Message.IExtendedTextMessage;
 export type WAContextInfo = proto.IContextInfo;
 export type WALocationMessage = proto.Message.ILocationMessage;
 export type WAGenericMediaMessage = proto.Message.IVideoMessage | proto.Message.IImageMessage | proto.Message.IAudioMessage | proto.Message.IDocumentMessage | proto.Message.IStickerMessage;
+// [Ported from @itsliaaa/baileys] exported message-related enum types from proto.Message
+export declare const AssociationType: typeof import("../../WAProto/index.js").proto.MessageAssociation.AssociationType;
+export declare const ButtonHeaderType: typeof import("../../WAProto/index.js").proto.Message.ButtonsMessage.HeaderType;
+export declare const ButtonType: typeof import("../../WAProto/index.js").proto.Message.ButtonsMessage.Button.Type;
+export declare const CarouselCardType: typeof import("../../WAProto/index.js").proto.Message.InteractiveMessage.CarouselMessage.CarouselCardType;
+export declare const ListType: typeof import("../../WAProto/index.js").proto.Message.ListMessage.ListType;
+export declare const ProtocolType: typeof import("../../WAProto/index.js").proto.Message.ProtocolMessage.Type;
 export declare const WAMessageStubType: typeof proto.WebMessageInfo.StubType;
 export declare const WAMessageStatus: typeof proto.WebMessageInfo.Status;
 import type { ILogger } from '../Utils/logger.js';
@@ -78,9 +85,34 @@ type Mentionable = {
 type Contextable = {
     /** add contextInfo to the message */
     contextInfo?: proto.IContextInfo;
+    /** [itsliaaa port] direct external ad reply (no need to build contextInfo yourself) */
+    externalAdReply?: {
+        title?: string;
+        body?: string;
+        thumbnail?: Buffer;
+        mediaType?: number;
+        url?: string;
+        sourceUrl?: string;
+        largeThumbnail?: boolean;
+        [key: string]: unknown;
+    };
+    /** [itsliaaa port] wrap message into groupStatusMessageV2 (group status) */
+    groupStatus?: boolean;
+    /** [itsliaaa port] wrap message into spoilerMessage */
+    spoiler?: boolean;
+    /** [itsliaaa port] wrap interactiveMessage into templateMessage */
+    interactiveAsTemplate?: boolean;
+    /** [itsliaaa port] wrap message into ephemeralMessage */
+    ephemeral?: boolean;
 };
 type ViewOnce = {
     viewOnce?: boolean;
+    /** [itsliaaa port] wrap message into viewOnceMessageV2 */
+    viewOnceV2?: boolean;
+    /** [itsliaaa port] wrap message into viewOnceMessageV2Extension (audio) */
+    viewOnceV2Extension?: boolean;
+    /** [itsliaaa port] wrap message into lottieStickerMessage */
+    isLottie?: boolean;
 };
 type Editable = {
     edit?: WAMessageKey;
@@ -205,6 +237,131 @@ export type AnyRegularMessageContent = (({
     body?: string;
     footer?: string;
 } | SharePhoneNumber | RequestPhoneNumber) & ViewOnce;
+/**
+ * ============================================================================
+ * [Ported from @itsliaaa/baileys] additional content types
+ * ============================================================================
+ */
+/** pass-through: send raw proto fields directly; add `raw: true` alongside proto fields */
+export type RawMessageContent = Partial<proto.IMessage> & {
+    raw?: boolean;
+};
+/** a single native-flow button for interactive messages */
+export type NativeFlowButton = {
+    /** quick reply */
+    id?: string;
+    /** button label (alias: buttonText) */
+    text?: string;
+    buttonText?: string;
+    /** emoji icon name, upper-cased */
+    icon?: string;
+    /** copy-to-clipboard action */
+    copy?: string;
+    /** open URL action */
+    url?: string;
+    useWebview?: boolean;
+    /** click-to-call action */
+    call?: string;
+    /** single-select shortcut (inline list) */
+    sections?: unknown[];
+    /** raw native flow name + params passthrough */
+    name?: string;
+    paramsJson?: string;
+};
+/** AI rich-response submessage (code blocks, tables, links, images) */
+export type RichResponseSubMessage = {
+    text?: string;
+    inlineEntities?: unknown[];
+    code?: string;
+    language?: string;
+    items?: unknown[];
+    inlineImage?: string;
+    imageText?: string;
+    alignment?: number;
+    tapLinkUrl?: string;
+};
+/** options for `code` / `links` / `table` / `richResponse` rich messages */
+export type RichResponseOptions = {
+    title?: string;
+    contentText?: string;
+    headerText?: string;
+    footerText?: string;
+    disclaimerText?: string;
+    latex?: string;
+    noHeading?: boolean;
+} & ({
+    code: string;
+    language?: string;
+} | {
+    links: {
+        text?: string;
+        url: string;
+    }[];
+    inlineImage?: string;
+    imageText?: string;
+    alignment?: number;
+    tapLinkUrl?: string;
+} | {
+    table: string[][];
+} | {
+    richResponse: RichResponseSubMessage[];
+});
+/** interactive (native flow) message options */
+export type InteractiveMessageOptions = {
+    text?: string;
+    caption?: string;
+    footer?: string;
+    title?: string;
+    subtitle?: string;
+    thumbnail?: Buffer;
+    audioFooter?: WAMediaUpload;
+    nativeFlow?: NativeFlowButton[];
+    /** limited-time offer params (bottom sheet) */
+    offerText?: string;
+    offerUrl?: string;
+    offerCode?: string;
+    offerExpiration?: number;
+    /** options bottom-sheet */
+    optionText?: string;
+    optionTitle?: string;
+    /** biz collection */
+    bizJid?: string;
+    id?: string;
+    shopSurface?: number;
+};
+/** one card of a carousel */
+export type CarouselCardOptions = (AnyMediaMessageContent | {
+    product: WASendableProduct;
+    businessOwnerJid?: string;
+}) & {
+    text?: string;
+    caption?: string;
+    footer?: string;
+    title?: string;
+    subtitle?: string;
+    thumbnail?: Buffer;
+    audioFooter?: WAMediaUpload;
+    nativeFlow?: NativeFlowButton[];
+};
+/** hydrated template button (quick reply / url / call) */
+export type TemplateButtonOption = {
+    index?: number;
+    text?: string;
+    buttonText?: {
+        displayText: string;
+    };
+} & ({
+    id: string;
+} | {
+    url: string;
+} | {
+    call: string;
+});
+/** legacy buttons message button */
+export type LegacyButtonOption = NativeFlowButton & {
+    buttonId?: string;
+    type?: number;
+};
 export type AnyMessageContent = AnyRegularMessageContent | {
     forward: WAMessage;
     force?: boolean;
@@ -215,7 +372,38 @@ export type AnyMessageContent = AnyRegularMessageContent | {
     disappearingMessagesInChat: boolean | number;
 } | {
     limitSharing: boolean;
-} | ({ stickerPack: StickerPackContent } & Contextable);
+} | ({ stickerPack: StickerPackContent } & Contextable) | ({ stickers: {
+    name?: string;
+    publisher?: string;
+    description?: string;
+    cover?: WAMediaUpload;
+    stickers: {
+        data: WAMediaUpload;
+        emojis?: string[];
+        accessibilityLabel?: string;
+    }[];
+} } & Contextable) | ({ keep: WAMessageKey; type?: number } & Contextable) | ({ flowReply: {
+    text?: string;
+    name?: string;
+    paramsJson?: string;
+    version?: number;
+    format?: number;
+} } & Contextable) | ({ pollResult: {
+    name: string;
+    pollType?: number;
+    votes: {
+        name: string;
+        voteCount: string | number;
+    }[];
+} } & Contextable) | ({ pollUpdate: {
+    key: WAMessageKey;
+    vote: Uint8Array;
+    metadata?: unknown;
+} } & Contextable) | {
+    paymentInviteServiceType: number;
+} | ({ orderText: string; thumbnail: Buffer; [key: string]: unknown; } & Contextable) | ({ buttons: LegacyButtonOption[]; text?: string; caption?: string; footer?: string; title?: string; } & Contextable) | ({ sections: proto.Message.IListMessage.ISection[]; buttonText: string; title?: string; text?: string; footer?: string; listType?: number; } & Contextable) | ({ templateButtons: TemplateButtonOption[]; text?: string; caption?: string; footer?: string; id?: string; } & Contextable & Mentionable) | (InteractiveMessageOptions & {
+    nativeFlow: NativeFlowButton[];
+} & Contextable & Mentionable & Editable) | ({ cards: CarouselCardOptions[]; text?: string; } & Contextable) | ({ requestPaymentFrom: string; noteMessage?: unknown; [key: string]: unknown; } & Contextable) | ({ invoiceNote: string; } & AnyMediaMessageContent) | RawMessageContent | RichResponseOptions;
 export type GroupMetadataParticipants = Pick<GroupMetadata, 'participants'>;
 type MinimalRelayOptions = {
     /** override the message ID with a custom provided string */

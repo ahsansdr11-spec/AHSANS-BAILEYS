@@ -25,6 +25,10 @@ export const KEY_BUNDLE_TYPE = Buffer.from([5]);
 export const NOISE_WA_HEADER = Buffer.from([87, 65, 6, DICT_VERSION]); // last is "DICT_VERSION"
 /** from: https://stackoverflow.com/questions/3809401/what-is-a-good-regular-expression-to-match-a-url */
 export const URL_REGEX = /https:\/\/(?![^:@\/\s]+:[^:@\/\s]+@)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(:\d+)?(\/[^\s]*)?/g;
+// [Ported from @itsliaaa/baileys] support payload attached to AI-labelled messages
+export const BIZ_BOT_SUPPORT_PAYLOAD = '{"version":1,"is_ai_message":true,"should_upload_client_logs":false,"should_show_system_message":false,"ticket_id":"7004947587700716","citation_items":[],"ticket_locale":"us"}';
+export const LEXER_REGEX = /(\/\/.*|\/\*[\s\S]*?\*\/|#.*)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`[\s\S]*?`)|(\b[a-zA-Z_]\w*\b)(?=\s*\()|(\b[a-zA-Z_]\w*\b)|(\b\d+(?:\.\d+)?\b)|(\s+|[^\w\s]+)/g;
+// [Ported from @itsliaaa/baileys] lexer regex for rich-response code highlighting
 export const WA_CERT_DETAILS = {
     SERIAL: 0,
     ISSUER: 'WhatsAppLongTerm1',
@@ -98,6 +102,16 @@ export const MEDIA_PATH_MAP = {
   "sticker-pack": "/mms/document",
   "thumbnail-image": "/mms/document",
   "thumbnail-sticker-pack": "/mms/document",
+};
+// [Ported from @itsliaaa/baileys] newsletter media upload path ("/m1/" instead of "/o1/")
+// fixes: newsletter media upload rejected with wrong media path
+export const NEWSLETTER_MEDIA_PATH_MAP = {
+  image: "/newsletter/newsletter-image",
+  video: "/newsletter/newsletter-video",
+  document: "/newsletter/newsletter-document",
+  audio: "/newsletter/newsletter-audio",
+  sticker: "/newsletter/newsletter-image",
+  "thumbnail-link": "/newsletter/newsletter-thumbnail-link",
 };
 export const MEDIA_HKDF_KEY_MAPPING = {
   audio: "Audio",
